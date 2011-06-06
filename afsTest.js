@@ -1,7 +1,5 @@
 if (!DataView) { alert('no dataview'); }
 
-go();
-
 function go() {
 	var xhr = new XMLHttpRequest();
 	xhr.open('GET', 'test.adf', false);
@@ -12,12 +10,17 @@ function go() {
 		alert('FFFFFUUUUUU');
 	} else {
 		afs = new Afs();
-		if (! afs.load(buffer)) {
-			alert('Not a DOS disk');
-		} else {
-			// Do something cool
-			alert('Loaded OK');
+
+		afs.error = function(msg) {
+			alert(msg);
+		}
+
+		if (afs.load(buffer)) {
+			if (afs.dir()) {
+				document.write('OH HAI');
+			}
 		}
 	}
 }
 
+go();
