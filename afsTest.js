@@ -1,26 +1,81 @@
-if (!DataView) { alert('no dataview'); }
+function debug(msg) {
+	$('#debug pre').append(msg + "\n");
+}
 
-function go() {
-	var xhr = new XMLHttpRequest();
-	xhr.open('GET', 'test.adf', false);
-	xhr.responseType = 'arraybuffer';
-	xhr.send(null);
-	buffer = xhr.response;
-	if (! buffer) {
-		alert('FFFFFUUUUUU');
+function getSect(id) {
+	xhr.open('GET', 'getSect.php?sect=' + id, false);
+
+	// gecko and webkit handle this differently and jQuery isn't cool enough
+	// to support this yet
+	if (xhr.hasOwnProperty('responseType')) {
+		xhr.responseType = 'arraybuffer';
 	} else {
-		afs = new Afs();
+		xhr.overrideMimeType('text/plain; charset=x-user-defined');
+	}
 
-		afs.error = function(msg) {
-			alert(msg);
-		}
+	xhr.send(null);
 
-		if (afs.load(buffer)) {
-			if (afs.dir()) {
-				document.write('OH HAI');
-			}
-		}
+	if (xhr.mozResponseArrayBuffer != null) {
+		sector = xhr.mozResponseArrayBuffer;
+	} else {
+		sector = xhr.response;
+	}
+
+	if (! sector) {
+		alert("Couldn't read file");
+		return false;
+	}
+
+	return sector;
+}
+
+function init() {
+	xhr = new XMLHttpRequest();
+
+	afs = new Afs();
+
+	// set callbacks
+	afs.error = function(msg) {
+		alert(msg);
+	}
+
+	afs.getSect = getSect;
+
+	if (! afs.load()) {
+		alert("Couldn't read disk image");
+		return false;
+	}
+
+	return true;
+}
+
+function refresh() {
+	var dir = afs.dir();
+	$('#fileBrowser').empty();
+	$('#fileBrowser').append('<ul>');
+	for (var i in dir) {
+		var cur = dir[i];
+		var size = cur.type == 'dir' ? '[DIR]' : cur.size;
+		var prefix = cur.type == 'dir' ? 'd' : 'f';
+
+		$('#fileBrowser ul').append('<li class="' + cur.type + '" ' +
+				'id="' + prefix + cur.sect +'">' + 
+				'<span class="entName">' + cur.name + '</span>' +
+				'<span class="size">' + size + '</span>');
 	}
 }
 
-go();
+$(document).ready(function() {
+	$('#fileBrowser li').live('click', function() {
+		var id = $(this).attr('id');
+		if (id.charAt(0) == 'd') {
+			afs.changeDir(id.substring(1));
+			refresh();
+		}
+	});
+	if (init()) {
+		refresh();
+	}
+});
+
+

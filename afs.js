@@ -49,9 +49,11 @@ function Afs() {
 	const AFS_ROOT_v_mins = AFS_BSIZE - 0x24;
 	const AFS_ROOT_v_ticks = AFS_BSIZE - 0x20;
 
-
 	// dir block
 	const AFS_DIR_ht = 0x18;
+
+	// file header block
+	const AFS_FIL_byte_size = AFS_BSIZE - 0xbc;
 
 	// ----- END OF OFFSETS -----
 
@@ -64,11 +66,12 @@ function Afs() {
 		5: 'FFS+DIRCACHE+INTL',
 	}
 
-	this.isValid = false;
+	this.sectorCache = new Array();
 
-	this.load = function(img) {
-		this.image = img;
-
+	/**
+	* Load a new disk image
+	*/
+	this.load = function() {
 		if (! this.processBootBlock()) {
 			return false;
 		}
@@ -81,22 +84,54 @@ function Afs() {
 	}
 
 	/**
-	* Error function - just saves the error message but can be overridden to
-	* pop up a dialogue or whatever
+	* Error function - override in client code to do something with the errors
 	*/
-	this.error = function(msg) {
-		this.errorMessage = msg;
+	this.error = function(msg) { }
+
+	/**
+	* Callback function to return an arraybuffer containing the specified
+	* sector
+	*
+	* Client code must override this
+	*/
+	this.getSect = function(sec) {
+		throw "readSect() must be overridden";
 	}
 
 	/**
 	* Helper function to return a DataView of the given sector
+	*
+	* TODO: caching
 	*/
-	this.getBlock = function(sect) {
-		return new DataView(this.image, sect * AFS_BSIZE, AFS_BSIZE);
+	this.readSect = function(sect) {
+		if (this.sectorCache[sect] !== undefined) {
+			return this.sectorCache[sect];
+		} else {
+			ns = new DataView(this.getSect(sect));
+
+			// don't even think about caching the bootblock
+			if (sect <= 1) {
+				return ns;
+			}
+
+			// if it's a header block, cache it. TODO: there will be 'false
+			// positives' where the block is something like an FFS data
+			// block and where the first long happens to be the value of
+			// T_HEADER. For now we just live with that.
+			if (ns.getUint32(AFS_OFF_type) == AFS_T_HEADER) {
+				this.sectorCache[sect] = ns;
+			}
+
+			return ns;
+		}
 	}
 
+	/**
+	* Gets the name (volume label, directory or filename) from the specified
+	* sector
+	*/
 	this.getName = function(sect) {
-		blk = this.getBlock(sect);
+		blk = this.readSect(sect);
 		var nameLen = blk.getUint8(AFS_OFF_name_len);
 
 		if (nameLen > 30) {
@@ -113,15 +148,12 @@ function Afs() {
 		return name;
 	}
 
-
-	// checksums
-
 	/**
 	* Check standard checksum - this is the normal algoritm used by all
 	* blocks except the boot block
 	*/
 	this.checkStandardChecksum = function(sect) {
-		blk = this.getBlock(sect);
+		blk = this.readSect(sect);
 
 		var sum = 0;
 		var oldSum = blk.getUint32(AFS_OFF_chksum);
@@ -144,16 +176,20 @@ function Afs() {
 	* Calculate bootblock checksum (this is a different algorithm to the
 	* standard one)
 	*/
-	this.checkBootBlockChecksum = function() {
+	this.checkBootBlockChecksum = function(bb) {
 		var sum = 0;
-		var bb = this.bootBlock;
-		var oldSum = bb.getUint32(AFS_BB_checksum);
+		var oldSum = bb[0].getUint32(AFS_BB_checksum);
 
-		bb.setUint32(AFS_BB_checksum, 0);
-		for (var i = 0; i < this.bootBSize; i += 4) {
-			sum += bb.getUint32(i);
-			if (sum > 0xffffffff) { // 32-bit overflow
-				sum -= 0xffffffff;
+		bb[0].setUint32(AFS_BB_checksum, 0);
+
+		// loop through the 2 blocks
+		for (var idx = 0; idx <= 1; idx++) {
+			// and the data in each block
+			for (var i = 0; i < AFS_BSIZE; i += 4) {
+				sum += bb[idx].getUint32(i);
+				if (sum > 0xffffffff) { // 32-bit overflow
+					sum -= 0xffffffff;
+				}
 			}
 		}
 
@@ -167,21 +203,24 @@ function Afs() {
 	* determine location of root block
 	*/
 	this.processBootBlock = function() {
-		this.bootBlockSize = AFS_BSIZE * 2; // TODO: hardfile support
-		this.bootBlock = new DataView(this.image, 0, this.bootBlockSize);
+		var bb = new Array();
+
+		// boot 'block' is actually 2 sectors 0 and 1
+		bb[0] = this.readSect(0);
+		bb[1] = this.readSect(1);
 
 		// is it a DOS disk?
 		if (String.fromCharCode(
-				this.bootBlock.getUint8(0),
-				this.bootBlock.getUint8(1),
-				this.bootBlock.getUint8(2))
+				bb[0].getUint8(0),
+				bb[0].getUint8(1),
+				bb[0].getUint8(2))
 				!= 'DOS') {
 			this.error('Not a DOS disk');
 			return false;
 		}
 
 		// if valid FS type?
-		this.fsType = this.bootBlock.getUint8(3);
+		this.fsType = bb[0].getUint8(3);
 
 		if (this.fsType > 5) {
 			// unknown AFS type
@@ -190,10 +229,10 @@ function Afs() {
 		}
 
 		// if checksum is valid disk is bootable
-		this.bootable = this.checkBootBlockChecksum();
+		this.bootable = this.checkBootBlockChecksum(bb);
 
 		// get root block location
-		this.rootBlock = this.bootBlock.getUint32(AFS_BB_rootblock, false);
+		this.rootBlock = bb[0].getUint32(AFS_BB_rootblock, false);
 
 		return true;
 	}
@@ -202,7 +241,7 @@ function Afs() {
 	* Process root block - verify checksum, get volume label and other info
 	*/
 	this.processRootBlock = function() {
-		rb = this.getBlock(this.rootBlock);
+		rb = this.readSect(this.rootBlock);
 
 		// check type is correct first
 		if (rb.getUint32(AFS_OFF_type) != AFS_T_HEADER) {
@@ -229,21 +268,24 @@ function Afs() {
 		return true;
 	}
 
+	/************************************************************************
+	* Public Methods
+	*************************************************************************/
+
 	/**
 	* Get directory listing
 	*/
 	this.dir = function() {
-		db = this.getBlock(this.currentDir);
+		db = this.readSect(this.currentDir);
 
-		var table = new Array();
-		var ent;
-		var next;
+		var dir = new Array();
+		var ent, next, type;
 
-		for (var i = 0; i < AFS_HT_SIZE; i += 4) {
+		for (var i = 0; i < AFS_HT_SIZE * 4; i += 4) {
 			ent = db.getUint32(AFS_DIR_ht + i);
 
 			while (ent) {
-				cd = this.getBlock(ent);
+				cd = this.readSect(ent);
 
 				if (cd.getUint32(AFS_OFF_sec_type) != AFS_ST_USERDIR &&
 						cd.getUint32(AFS_OFF_sec_type) != AFS_ST_FILE) {
@@ -251,14 +293,31 @@ function Afs() {
 					return false;
 				}
 
-console.log(this.getName(ent));
+				if (cd.getUint32(AFS_OFF_sec_type) == AFS_ST_USERDIR) {
+					type = 'dir';
+				} else {
+					type = 'file';
+				}
+
+				dir.push({
+					'name': this.getName(ent),
+					'size': cd.getUint32(AFS_FIL_byte_size),
+					'type': type,
+					'sect': ent,
+				});
 
 				ent = cd.getUint32(AFS_OFF_hash_chain);
 			}
 		}
 
-		return true;
+		return dir;
 	}
 
+	/**
+	* Change current directory
+	*/
+	this.changeDir = function(newDir) {
+		this.currentDir = newDir;
+	}
 }
 
