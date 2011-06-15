@@ -51,15 +51,29 @@ function init() {
 
 function refresh() {
 	var dir = afs.dir();
+	var prefix, size;
+
 	$('#fileBrowser').empty();
 	$('#fileBrowser').append('<ul>');
+
 	for (var i in dir) {
 		var cur = dir[i];
-		var size = cur.type == 'dir' ? '[DIR]' : cur.size;
-		var prefix = cur.type == 'dir' ? 'd' : 'f';
+
+		switch (cur.type) {
+			case 'file':
+				size = cur.size; // TODO: format size
+				break;
+			case 'dir':
+				size = '[DIR]';
+				break;
+			case 'link':
+				size = '[LINK]';
+		}
+
+		prefix = cur.type.charAt(0);
 
 		$('#fileBrowser ul').append('<li class="' + cur.type + '" ' +
-				'id="' + prefix + cur.sect +'">' + 
+				'id="' + prefix + cur.sect +'">' +
 				'<span class="entName">' + cur.name + '</span>' +
 				'<span class="size">' + size + '</span>');
 	}
@@ -71,8 +85,14 @@ $(document).ready(function() {
 		if (id.charAt(0) == 'd') {
 			afs.changeDir(id.substring(1));
 			refresh();
+		} else if (id.charAt(0) == 'f') {
+			var file = afs.readFile(id.substring(1));
+			if (file !== false) {
+				alert(file);
+			}
 		}
 	});
+
 	if (init()) {
 		refresh();
 	}
