@@ -11,6 +11,7 @@
 function Afs() {
 	// primary types
 	const AFS_T_HEADER = 0x02;
+	const AFS_T_DATA = 0x08;
 	const AFS_T_LIST = 0x10;
 
 	// secondary types
@@ -21,8 +22,8 @@ function Afs() {
 	const AFS_ST_FILE = 0xfffffffd; // -3, but we're using usigned ints
 	const AFS_ST_LINKFILE = 0xfffffffc; // -4
 
-	const AFS_BSIZE = 0x200;
-	const AFS_HT_SIZE = (AFS_BSIZE / 4) - 0x38;
+	const AFS_SECTSIZE = 0x200;
+	const AFS_HT_SIZE = (AFS_SECTSIZE / 4) - 0x38;
 
 	// ----- OFFSETS -----
 
@@ -42,29 +43,33 @@ function Afs() {
 	const AFS_OFF_ht_size = 0x0c;
 	const AFS_OFF_first_data = 0x10
 	const AFS_OFF_chksum = 0x14;
-	const AFS_OFF_sec_type = AFS_BSIZE - 0x04;
-	const AFS_OFF_name_len = AFS_BSIZE - 0x50;
-	const AFS_OFF_name = AFS_BSIZE - 0x4f;
-	const AFS_OFF_hash_chain = AFS_BSIZE - 0x10;
+	const AFS_OFF_sec_type = AFS_SECTSIZE - 0x04;
+	const AFS_OFF_name_len = AFS_SECTSIZE - 0x50;
+	const AFS_OFF_name = AFS_SECTSIZE - 0x4f;
+	const AFS_OFF_hash_chain = AFS_SECTSIZE - 0x10;
 
 	// root block
-	const AFS_ROOT_bm_flag = AFS_BSIZE - 0xc8;
-	const AFS_ROOT_bm_pages = AFS_BSIZE - 0xc4;
-	const AFS_ROOT_bm_ext = AFS_BSIZE - 0x60;
-	const AFS_ROOT_r_days = AFS_BSIZE - 0x5c; // root alteration date
-	const AFS_ROOT_r_mins = AFS_BSIZE - 0x58;
-	const AFS_ROOT_r_ticks = AFS_BSIZE - 0x54;
-	const AFS_ROOT_v_days = AFS_BSIZE - 0x28;
-	const AFS_ROOT_v_mins = AFS_BSIZE - 0x24;
-	const AFS_ROOT_v_ticks = AFS_BSIZE - 0x20;
+	const AFS_ROOT_bm_flag = AFS_SECTSIZE - 0xc8;
+	const AFS_ROOT_bm_pages = AFS_SECTSIZE - 0xc4;
+	const AFS_ROOT_bm_ext = AFS_SECTSIZE - 0x60;
+	const AFS_ROOT_r_days = AFS_SECTSIZE - 0x5c; // root alteration date
+	const AFS_ROOT_r_mins = AFS_SECTSIZE - 0x58;
+	const AFS_ROOT_r_ticks = AFS_SECTSIZE - 0x54;
+	const AFS_ROOT_v_days = AFS_SECTSIZE - 0x28;
+	const AFS_ROOT_v_mins = AFS_SECTSIZE - 0x24;
+	const AFS_ROOT_v_ticks = AFS_SECTSIZE - 0x20;
 
 	// dir block
 	const AFS_DIR_ht = 0x18;
-	const AFS_DIR_parent = AFS_BSIZE - 0x0c;
+	const AFS_DIR_parent = AFS_SECTSIZE - 0x0c;
 
 	// file header block
+	const AFS_FIL_high_seq = 0x08;
 	const AFS_FIL_first_data = 0x10;
-	const AFS_FIL_byte_size = AFS_BSIZE - 0xbc;
+	const AFS_FIL_data_blocks = 0x18;
+	const AFS_FIL_data_blocks_last = AFS_SECTSIZE - 0xcc;
+	const AFS_FIL_byte_size = AFS_SECTSIZE - 0xbc;
+	const AFS_FIL_extension = AFS_SECTSIZE - 0x08;
 
 	// file data block (OFS)
 	const AFS_FIL_data_size = 0x0c;
@@ -101,8 +106,6 @@ function Afs() {
 
 	/**
 	* Helper function to return a DataView of the given sector
-	*
-	* TODO: caching
 	*/
 	this.readSect = function(sect) {
 		if (this.sectorCache[sect] !== undefined) {
@@ -167,15 +170,23 @@ function Afs() {
 
 		blk.setUint32(sumPos, 0); // clear old checksum
 
-		for (var i = 0; i < AFS_BSIZE; i += 4) {
+		for (var i = 0; i < AFS_SECTSIZE; i += 4) {
 			sum += blk.getUint32(i);
+			var j = i / 4;
 			if (sum > 0xffffffff) { // 32-bit overflow
 				sum -= 0x100000000;
 			}
 		}
 
-		// negate checksum (invert bits and add 1)
-		sum = ~sum + 1;
+		// negate checksum
+		sum = -sum;
+
+		// if the checksum is negative javascript won't give us the result we
+		// expect since it stores numbers as double precision floats. Fix by
+		// doing the twos complement ourselves
+		if (sum < 0) {
+			sum = 0xffffffff + sum + 1;
+		}
 
 		// restore old checksum
 		blk.setUint32(sumPos, oldSum);
@@ -196,7 +207,7 @@ function Afs() {
 		// loop through the 2 blocks
 		for (var idx = 0; idx <= 1; idx++) {
 			// and the data in each block
-			for (var i = 0; i < AFS_BSIZE; i += 4) {
+			for (var i = 0; i < AFS_SECTSIZE; i += 4) {
 				sum += bb[idx].getUint32(i);
 				if (sum > 0xffffffff) { // 32-bit overflow
 					sum -= 0xffffffff;
@@ -331,11 +342,11 @@ function Afs() {
 		// loop through data blocks and append data
 		// TODO: this can be optimised
 		while (curSect) {
-			var currentBlock = this.readSect(curSect);
-
-			if (! this.sanityCheckBlock(currentBlock, T_DATA)) {
+			if (! this.sanityCheckBlock(curSect, AFS_T_DATA)) {
 				return false;
 			}
+
+			var currentBlock = this.readSect(curSect);
 
 			var dataSize = currentBlock.getUint32(AFS_FIL_data_size);
 
@@ -355,12 +366,47 @@ function Afs() {
 	* then follow file extension block chain)
 	*/
 	this.readFileFfs = function(sect) {
-		var headerBlock = this.readSect(sect);
+		var headerSect = this.readSect(sect);
 
-		var bytesLeft = headerBlock.getUint32(AFS_FILE_byte_size);
-		var blocksLeft = headerBlocker.getUint32(AFS_FILE_high_seq);
+		var bytesLeft = headerSect.getUint32(AFS_FIL_byte_size);
 
-		var dataBlocks = new Array();
+		if (bytesLeft == 0) {
+			return '';
+		}
+
+		var highSeq = headerSect.getUint32(AFS_FIL_high_seq);
+		var headerOffset = 0; // offset into data_blocks[]
+		var bytesInBlock;
+
+		var fileData = '';
+
+		while (bytesLeft) {
+			// first data block is the *last* entry in data_blocks[]
+			var currentData = headerSect.getUint32(AFS_FIL_data_blocks_last -
+					(headerOffset * 4));
+			headerOffset++;
+
+			bytesInBlock = bytesLeft > AFS_SECTSIZE ? AFS_SECTSIZE : bytesLeft;
+
+			var dataSect = this.readSect(currentData);
+
+			for (var i = 0; i < bytesInBlock; i++) {
+				fileData += String.fromCharCode(dataSect.getUint8(i));
+			}
+
+			bytesLeft -= bytesInBlock;
+
+			// if we haven't read all the file and we are at the last data
+			// block we need to fetch the next file extension block
+			if (bytesLeft && headerOffset == highSeq) {
+				headerSect = this.readSect(headerSect.getUint32(
+					AFS_FIL_extension));
+				headerOffset = 0;
+				highSeq = headerSect.getUint32(AFS_FIL_high_seq);
+			}
+		}
+
+		return fileData;
 	}
 
 
@@ -388,20 +434,26 @@ function Afs() {
 	/**
 	* Get directory listing
 	*/
-	this.dir = function() {
+	this.dir = function(callback) {
+		if (! this.sanityCheckBlock(this.currentDir, AFS_T_HEADER)) {
+			return false;
+		}
+
 		db = this.readSect(this.currentDir);
 
 		var dir = new Array();
-		var ent, next, type, secType;
+		var ent, next, type, secType, info;
 
 		// Add a parent dir entry if we're not at the root dir
 		if (this.currentDir != this.volumeInfo['rootBlock']) {
-			dir.push({
+			info = {
 				'name': '..',
 				'size': 0,
 				'type': 'dir',
 				'sect': db.getUint32(AFS_DIR_parent),
-			});
+			};
+			dir.push(info);
+			callback(info);
 		}
 
 		for (var i = 0; i < AFS_HT_SIZE * 4; i += 4) {
@@ -431,16 +483,20 @@ function Afs() {
 					return false;
 				}
 
-				dir.push({
+				info = {
 					'name': this.getName(ent),
 					'size': cd.getUint32(AFS_FIL_byte_size),
 					'type': type,
 					'sect': ent,
-				});
+				};
+				dir.push(info);
+				callback(info);
 
 				ent = cd.getUint32(AFS_OFF_hash_chain);
 			}
 		}
+
+		callback(false);
 
 		return dir;
 	}

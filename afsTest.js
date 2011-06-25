@@ -50,18 +50,17 @@ function init() {
 }
 
 function refresh() {
-	var dir = afs.dir();
-	var prefix, size;
+	var size;
 
 	$('#fileBrowser').empty();
 	$('#fileBrowser').append('<ul>');
 
-	for (var i in dir) {
-		var cur = dir[i];
+	afs.dir(function(info) {
+		if (info) {
 
-		switch (cur.type) {
+		switch (info.type) {
 			case 'file':
-				size = cur.size; // TODO: format size
+				size = info.size; // TODO: format size
 				break;
 			case 'dir':
 				size = '[DIR]';
@@ -70,13 +69,16 @@ function refresh() {
 				size = '[LINK]';
 		}
 
-		prefix = cur.type.charAt(0);
+		prefix = info.type.charAt(0);
 
-		$('#fileBrowser ul').append('<li class="' + cur.type + '" ' +
-				'id="' + prefix + cur.sect +'">' +
-				'<span class="entName">' + cur.name + '</span>' +
+		$('#fileBrowser ul').append('<li class="' + info.type + '" ' +
+				'id="' + prefix + info.sect +'">' +
+				'<span class="entName">' + info.name + '</span>' +
 				'<span class="size">' + size + '</span>');
-	}
+		} else {
+			debug("end of list");
+		}
+	});
 }
 
 $(document).ready(function() {
