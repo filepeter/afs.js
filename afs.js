@@ -1,11 +1,21 @@
 /**
 * afsjs - Amiga Filesystem implementation in javascript
 *
-* Copyright 2011 by Dan Sutherland <djs@djs.org.uk>
+* Copyright 2011-2012 by Dan Sutherland <djs@djs.org.uk>
 *
 * This code may be distributed, modified and used for any purpose provided
 * this copyright notice is left intact and/or the author is credited in the
 * documentation of any software or service using this code.
+*
+* About variable naming: generally the terms 'block' and 'sector' are
+* interchangeable, however in this code they have explicit meanings - 'block'
+* refers to the address of a sector on disk (an integer between 0 and 1759 for
+* a standard DD disk). 'sector' refers to the actual data within the sector -
+* here, an ArrayBuffer 512 bytes in size.
+*
+* TODO:
+* - verify checksums for OFS data blocks
+* - international mode
 */
 
 function Afs() {
@@ -95,48 +105,81 @@ function Afs() {
 	this.error = function(msg) { }
 
 	/**
-	* Callback function to return an arraybuffer containing the specified
-	* sector
-	*
-	* Client code must override this
+	* Debug function - override in client code to do something with the debug messages
 	*/
-	this.getSect = function(sec) {
-		throw "readSect() must be overridden";
-	}
+	this.debug = function(msg) { }
 
 	/**
 	* Helper function to return a DataView of the given sector
 	*/
-	this.readSect = function(sect) {
-		if (this.sectorCache[sect] !== undefined) {
-			return this.sectorCache[sect];
-		} else {
-			ns = new DataView(this.getSect(sect));
+	this.readSect = function(block, callback) {
+		this.debug('readSect: ' + block);
 
-			// don't even think about caching the bootblock
-			if (sect <= 1) {
-				return ns;
-			}
-
-			// if it's a header block, cache it. TODO: there will be 'false
-			// positives' where the block is something like an FFS data
-			// block and where the first long happens to be the value of
-			// T_HEADER. For now we just live with that.
-			if (ns.getUint32(AFS_OFF_type) == AFS_T_HEADER) {
-				this.sectorCache[sect] = ns;
-			}
-
-			return ns;
+		if (!(this instanceof Afs)) {
+			alert('oh fuck we are not Afs');
 		}
+
+		// In the case of a cache hit just return cached sector
+		if (this.sectorCache[block] !== undefined) {
+			this.debug('Cache hit for block ' + block);
+			callback.call(this, this.sectorCache[block]);
+			return true;
+		}
+
+		var xhr = new XMLHttpRequest();
+		xhr.open('GET', 'getSect.php?sect=' + block, true);
+		xhr.responseType = 'arraybuffer';
+
+		var self = this;
+
+		xhr.onreadystatechange = function() {
+			if (xhr.readyState == 4) {
+				if (xhr.status == 200) {
+					var data = xhr.response;
+
+					if (data) {
+						self.debug('got data');
+
+						newSect = new DataView(data);
+
+						// Don't cache the bootblock since there should be no reason to
+						// read it more than once
+						if (block <= 1) {
+							self.debug('Not caching sector ' + block + ' because it is a bootsector');
+							callback.call(self, newSect);
+							return true;
+						}
+
+						// if it's a header block, cache it. TODO: there will be 'false
+						// positives' where the block is something like an FFS data
+						// block and where the first long happens to be the value of
+						// T_HEADER. For now we just live with that.
+						if (newSect.getUint32(AFS_OFF_type) == AFS_T_HEADER) {
+							self.debug('caching sector ');
+							self.sectorCache[block] = newSect;
+						}
+
+						callback.call(self, newSect);
+					} else {
+						self.error('Fucked up: ' + xhr.statusText);
+					}
+				}
+			}
+		};
+
+		xhr.send(null);
 	}
 
+/*	this.xhrResponse = function() {
+
+	}
+*/
 	/**
 	* Gets the name (volume label, directory or filename) from the specified
 	* sector
 	*/
 	this.getName = function(sect) {
-		blk = this.readSect(sect);
-		var nameLen = blk.getUint8(AFS_OFF_name_len);
+		var nameLen = sect.getUint8(AFS_OFF_name_len);
 
 		if (nameLen > 30) {
 			this.error('Name too long');
@@ -146,7 +189,7 @@ function Afs() {
 		var name = '';
 
 		for (var i = 0; i < nameLen; i++) {
-			name += String.fromCharCode(blk.getUint8(AFS_OFF_name + i));
+			name += String.fromCharCode(sect.getUint8(AFS_OFF_name + i));
 		}
 
 		return name;
@@ -157,21 +200,23 @@ function Afs() {
 	* blocks except the boot block
 	*/
 	this.checkStandardChecksum = function(sect, isBitmap) {
+		this.debug('Validating checksum');
+
 		if (typeof isBitmap == 'undefined') {
 			isBitmap = false;
 		}
 
-		var blk = this.readSect(sect);
+		this.debug('Is it a bitmap? ' + isBitmap);
 
 		// bitmap checksum is at a different position to other blocks
 		var sumPos = isBitmap ? AFS_BM_checksum : AFS_OFF_chksum;
 		var sum = 0;
-		var oldSum = blk.getUint32(sumPos, false);
+		var oldSum = sect.getUint32(sumPos, false);
 
-		blk.setUint32(sumPos, 0); // clear old checksum
+		sect.setUint32(sumPos, 0); // clear old checksum
 
 		for (var i = 0; i < AFS_SECTSIZE; i += 4) {
-			sum += blk.getUint32(i);
+			sum += sect.getUint32(i);
 			var j = i / 4;
 			if (sum > 0xffffffff) { // 32-bit overflow
 				sum -= 0x100000000;
@@ -189,9 +234,13 @@ function Afs() {
 		}
 
 		// restore old checksum
-		blk.setUint32(sumPos, oldSum);
+		sect.setUint32(sumPos, oldSum);
 
-		return (sum == oldSum);
+		isValid = (sum == oldSum);
+
+		this.debug('Is it valid? ' + isValid);
+
+		return isValid;
 	}
 
 	/**
@@ -220,29 +269,25 @@ function Afs() {
 		return (sum == oldSum);
 	}
 
-	/**
-	* Check bootblock - make sure we have a valid DOS disk, check if bootable,
-	* determine location of root block
-	*/
-	this.processBootBlock = function() {
-		var bb = new Array();
+	this.processFirstBootBlock = function(sect) {
+		this.bb[0] = sect;
+		this.readSect(1, this.processSecondBootBlock);
+	};
 
-		// boot 'block' is actually 2 sectors 0 and 1
-		bb[0] = this.readSect(0);
-		bb[1] = this.readSect(1);
+	this.processSecondBootBlock = function(sect) {
+		this.bb[1] = sect;
 
 		// is it a DOS disk?
 		if (String.fromCharCode(
-				bb[0].getUint8(0),
-				bb[0].getUint8(1),
-				bb[0].getUint8(2))
+				this.bb[0].getUint8(0),
+				this.bb[0].getUint8(1),
+				this.bb[0].getUint8(2))
 				!= 'DOS') {
 			this.error('Not a DOS disk');
-			return false;
 		}
 
-		// if valid FS type?
-		var fst = bb[0].getUint8(AFS_BB_fs_type);
+		// is valid FS type?
+		var fst = this.bb[0].getUint8(AFS_BB_fs_type);
 
 		if (fst > 5) {
 			// unknown AFS type
@@ -254,74 +299,97 @@ function Afs() {
 		this.volumeInfo['fsTypeDesc'] = AFS_FsTypes[fst];
 
 		// if checksum is valid disk is bootable
-		this.volumeInfo['bootable'] = this.checkBootBlockChecksum(bb);
+		this.volumeInfo['bootable'] = this.checkBootBlockChecksum(this.bb);
 
 		// get root block location
-		var rb = bb[0].getUint32(AFS_BB_rootblock);
+		var rb = this.bb[0].getUint32(AFS_BB_rootblock);
 
 		// default is 880 if not specified
 		if (rb == 0) {
 			rb = 880;
 		}
-		this.volumeInfo['rootBlock'] = rb;
 
-		return true;
+		this.volumeInfo['rootBlock'] = rb;
+		this.debug('rootblock location is: ' + rb);
+
+		this.readSect(rb, function(sect) {
+			this.processRootBlock(sect);
+		});
+	};
+
+	/**
+	* Check bootblock - make sure we have a valid DOS disk, check if bootable,
+	* determine location of root block
+	*/
+	this.processBootBlock = function() {
+		this.bb = new Array();
+		this.readSect(0, this.processFirstBootBlock);
 	}
 
 	/**
 	* Process root block - verify checksum, get volume label and other info
 	*/
-	this.processRootBlock = function() {
-		var rbSect = this.volumeInfo['rootBlock'];
-		var rb = this.readSect(rbSect);
-
-		if (! this.sanityCheckBlock(rbSect, AFS_T_HEADER, AFS_ST_ROOT)) {
+	this.processRootBlock = function(sect) {
+		this.debug('Processing rootblock');
+	
+		if (!this.sanityCheckBlock(sect, AFS_T_HEADER, AFS_ST_ROOT)) {
 			this.error('Root block failed sanity checking');
 			return false;
 		}
 
-		// read bitmap block and verify checksum
-		var bmSect = rb.getUint32(AFS_ROOT_bm_pages);
-		var bm = this.readSect(bmSect);
+		this.debug('Rootblock declared sane');
 
-		if (! this.checkStandardChecksum(bmSect, true)) {
+		// all good - now extract volume label and set current dir to here
+		this.volumeInfo['label'] = this.getName(sect);
+		this.currentDir = this.volumeInfo['rootBlock'];
+
+		this.debug('Volume label is: ' + this.volumeInfo['label']);
+
+		// get location of bitmap block
+		var bmBlock = sect.getUint32(AFS_ROOT_bm_pages);
+
+		this.readSect(bmBlock, this.processBitmapBlock);
+
+	}
+
+	/**
+	* Process bitmap block - verify checksum
+	*/
+	this.processBitmapBlock = function(sect) {
+		this.debug('Processing bitmap block');
+
+		if (!this.checkStandardChecksum(sect, true)) {
 			this.error('Bitmap block checksum invalid');
 			return false;
 		}
 
-		// all good - now extract volume label and set current dir to here
-		this.volumeInfo['label'] = this.getName(rbSect);
-		this.currentDir = rbSect;
-
 		// 'valid' means used sector count can be trusted
-		this.volumeInfo['valid'] = rb.getUint32(AFS_ROOT_bm_flag)
+		this.volumeInfo['valid'] = sect.getUint32(AFS_ROOT_bm_flag)
 				== 0xffffffff;
 
-		return true;
-	}
+		this.refreshFunction();
+	};
 
 	/**
 	* Sanity check a block - verify checksum is correct, type is correct and
 	* sec_type is correct (if it is provided - file data blocks have no
-	* sec_type
+	* sec_type)
 	*/
 	this.sanityCheckBlock = function(sect, type, secType) {
-		var blk = this.readSect(sect);
-
-		if (! this.checkStandardChecksum(sect)) {
+		if (!this.checkStandardChecksum(sect)) {
 			this.error('Checksum invalid for sector ' + sect);
 			return false;
 		}
 
-		if (blk.getUint32(AFS_OFF_type) != type) {
+		if (sect.getUint32(AFS_OFF_type) != type) {
 			this.error('type for sector ' + sect + ' is not ' +
 					type.toString(16));
 			return false;
 		}
 
 		if (typeof secType != 'undefined'
-		&& blk.getUint32(AFS_OFF_sec_type) != secType) {
-			this.error('sec_type for sector ' + sect + ' is not ' +
+		&& sect.getUint32(AFS_OFF_sec_type) != secType) {
+			this.error('sec_type for sector is not ' +
 					secType.toString(16));
 			return false;
 		}
@@ -342,7 +410,7 @@ function Afs() {
 		// loop through data blocks and append data
 		// TODO: this can be optimised
 		while (curSect) {
-			if (! this.sanityCheckBlock(curSect, AFS_T_DATA)) {
+			if (!this.sanityCheckBlock(curSect, AFS_T_DATA)) {
 				return false;
 			}
 
@@ -409,7 +477,6 @@ function Afs() {
 		return fileData;
 	}
 
-
 	/************************************************************************
 	* Public Methods
 	*************************************************************************/
@@ -417,31 +484,37 @@ function Afs() {
 	/**
 	* Load a new disk image
 	*/
-	this.load = function() {
+	this.load = function(callback) {
 		this.volumeInfo = new Array();
+		this.refreshFunction = callback;
+		this.processBootBlock();
+	}
 
-		if (! this.processBootBlock()) {
-			return false;
-		}
-
-		if (! this.processRootBlock()) {
-			return false;
-		}
-
-		return true;
+	/**
+	* Eject disk and free up memory
+	*/
+	this.eject = function() {
+		this.volumeInfo = new Array();
+		this.sectorCache = new Array();
 	}
 
 	/**
 	* Get directory listing
 	*/
-	this.dir = function(callback) {
-		if (! this.sanityCheckBlock(this.currentDir, AFS_T_HEADER)) {
+	this.dir = function() {
+		this.readSect.call(this, this.currentDir, this.processDirectory);
+	}
+
+	this.processDirEntry = function(sect) {
+
+	}
+
+	this.processDirectory = function(sect) {
+		if (!this.sanityCheckBlock(sect, AFS_T_HEADER)) {
 			return false;
 		}
 
-		db = this.readSect(this.currentDir);
-
-		var dir = new Array();
+//		var dir = new Array();
 		var ent, next, type, secType, info;
 
 		// Add a parent dir entry if we're not at the root dir
@@ -450,14 +523,24 @@ function Afs() {
 				'name': '..',
 				'size': 0,
 				'type': 'dir',
-				'sect': db.getUint32(AFS_DIR_parent),
+				'sect': sect.getUint32(AFS_DIR_parent),
 			};
-			dir.push(info);
-			callback(info);
+//			dir.push(info);
+			this.dirEntry(info);
 		}
 
+		ent = sect.getUint32(AFS_DIR_ht + i);
+
+		if (ent) {
+			this.readSect(ent, this.processDirEntry);
+		}
+
+		this.currentHashTableEntry = 0;
+
+		this.readSect(ent, this.processDirEntry);
+
+
 		for (var i = 0; i < AFS_HT_SIZE * 4; i += 4) {
-			ent = db.getUint32(AFS_DIR_ht + i);
 
 			while (ent) {
 				cd = this.readSect(ent);
@@ -490,15 +573,13 @@ function Afs() {
 					'sect': ent,
 				};
 				dir.push(info);
-				callback(info);
+				this.dirEntry(info);
 
-				ent = cd.getUint32(AFS_OFF_hash_chain);
+				this.currentDirEntry = cd.getUint32(AFS_OFF_hash_chain);
 			}
 		}
 
-		callback(false);
-
-		return dir;
+		throw 'Error reading directory';
 	}
 
 	/**

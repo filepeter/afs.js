@@ -15,11 +15,10 @@ if ($sect < 0 || $sect >= MAX_SECT) {
 
 header('Content-type: application/octet-stream');
 
-$fil = fopen('test.adf', 'rb');
+$fil = fopen('ASI001.ADF', 'rb');
 fseek($fil, $sect * SECT_SIZE);
 $buf = fread($fil, SECT_SIZE);
 fclose($fil);
 
 echo $buf;
 
-?>
