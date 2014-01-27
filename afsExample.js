@@ -1,22 +1,3 @@
-function init() {
-	afs = new Afs();
-
-	// set callbacks
-	afs.error = function(msg) {
-		alert(msg);
-	}
-
-	afs.debug = function(msg) {
-		console.log(msg);
-	};
-
-	afs.dataUrl = 'getSect.php?sect=';
-
-	afs.load(function() {
-		refresh();
-	});
-}
-
 function dirEntryCallback(info) {
 	switch (info.type) {
 		case 'file':
@@ -37,14 +18,35 @@ function dirEntryCallback(info) {
 			'<span class="size">' + size + '</span>');
 }
 
+function init() {
+	afs = new Afs();
+
+	// set callbacks
+	afs.error = function(msg) {
+		alert(msg);
+	}
+
+	afs.debug = function(msg) {
+		console.log(msg);
+	};
+
+	afs.dirEntry = dirEntryCallback;
+
+	afs.dataUrl = 'getSect.php?sect=';
+
+	afs.load(function() {
+		refresh();
+	});
+}
+
+
 function refresh() {
 	var size;
 
 	$('#fileBrowser').empty();
 	$('#fileBrowser').append('<ul>');
 
-	afs.dir(function(info) {
-	});
+	afs.dir();
 }
 
 $(document).ready(function() {

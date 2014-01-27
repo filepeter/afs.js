@@ -34,10 +34,10 @@ afs.error = function(msg) { alert(msg); }
 
 afs.getSect = myGetSect;
 
-6. 
 
 TODO:
 
 - Support for international mode
 - Use directory cache blocks
 - Support for hardfiles
+- Write support

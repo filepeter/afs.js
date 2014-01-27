@@ -138,8 +138,6 @@ function Afs() {
 					var data = xhr.response;
 
 					if (data) {
-						self.debug('got data');
-
 						newSect = new DataView(data);
 
 						// Don't cache the bootblock since there should be no reason to
@@ -170,10 +168,6 @@ function Afs() {
 		xhr.send(null);
 	}
 
-/*	this.xhrResponse = function() {
-
-	}
-*/
 	/**
 	* Gets the name (volume label, directory or filename) from the specified
 	* sector
@@ -312,9 +306,7 @@ function Afs() {
 		this.volumeInfo['rootBlock'] = rb;
 		this.debug('rootblock location is: ' + rb);
 
-		this.readSect(rb, function(sect) {
-			this.processRootBlock(sect);
-		});
+		this.readSect(rb, this.processRootBlock);
 	};
 
 	/**
@@ -349,7 +341,6 @@ function Afs() {
 		var bmBlock = sect.getUint32(AFS_ROOT_bm_pages);
 
 		this.readSect(bmBlock, this.processBitmapBlock);
-
 	}
 
 	/**
@@ -506,16 +497,75 @@ function Afs() {
 	}
 
 	this.processDirEntry = function(sect) {
+		this.debug('processDirEntry');
 
-	}
+		// We're done if we're at the end of the hash table
+		if (this.currentHashtableEntry == (AFS_HT_SIZE * 4)) {
+			return;
+		}
 
-	this.processDirectory = function(sect) {
-		if (!this.sanityCheckBlock(sect, AFS_T_HEADER)) {
+		// set type according to block's sec_type field
+		secType = sect.getUint32(AFS_OFF_sec_type);
+		this.debug('Sec type: ' + secType.toString(16));
+
+		switch (secType) {
+			case AFS_ST_USERDIR:
+				type = 'dir';
+				break;
+			case AFS_ST_FILE:
+				type = 'file';
+				break;
+			case AFS_ST_SOFTLINK:
+			case AFS_ST_LINKFILE:
+			case AFS_ST_LINKDIR:
+				type = 'link';
+				break;
+			default:
+				this.error('Unknown sec_type "' + secType.toString(16)
+					+ '" for block in dir chain');
 			return false;
 		}
 
-//		var dir = new Array();
-		var ent, next, type, secType, info;
+		info = {
+			'name': this.getName(sect),
+			'size': sect.getUint32(AFS_FIL_byte_size),
+			'type': type,
+			'sect': this.currentDirEntry,
+		};
+		this.dirEntry(info);
+
+		var nextBlock = sect.getUint32(AFS_OFF_hash_chain);
+
+		if (0 != nextBlock) {
+			this.debug('Following hash chain');
+			this.currentDirEntry = nextBlock;
+			this.readSect(nextBlock, this.processDirEntry);
+			return;
+		}
+
+		this.debug('End of hash chain');
+
+		this.currentHashtableEntry += 4;
+		this.debug('hash table entry: ' + this.currentHashtableEntry.toString(10));
+
+		while (0 == nextBlock && this.currentHashtableEntry < AFS_HT_SIZE * 4) {
+			nextBlock = this.currentDirBlock.getUint32(AFS_DIR_ht + this.currentHashtableEntry);
+			this.debug('Trying block ' + nextBlock.toString(10));
+			this.currentHashtableEntry += 4;
+		}
+
+		if (0 != nextBlock) {
+			this.currentDirEntry = nextBlock;
+			this.readSect(nextBlock, this.processDirEntry);
+		}		
+	}
+
+	this.processDirectory = function(sect) {
+		this.debug('processDirectory()');
+
+		if (!this.sanityCheckBlock(sect, AFS_T_HEADER)) {
+			return false; // TODO: exception?
+		}
 
 		// Add a parent dir entry if we're not at the root dir
 		if (this.currentDir != this.volumeInfo['rootBlock']) {
@@ -525,67 +575,37 @@ function Afs() {
 				'type': 'dir',
 				'sect': sect.getUint32(AFS_DIR_parent),
 			};
-//			dir.push(info);
 			this.dirEntry(info);
 		}
 
-		ent = sect.getUint32(AFS_DIR_ht + i);
+		this.currentDirBlock = sect;
+		this.currentHashtableEntry = 0;
 
-		if (ent) {
-			this.readSect(ent, this.processDirEntry);
+		var startingBlock = 0;
+
+		while (0 == startingBlock && this.currentHashtableEntry < AFS_HT_SIZE * 4) {
+			startingBlock = sect.getUint32(AFS_DIR_ht + this.currentHashtableEntry);
+			this.debug('Trying block ' + startingBlock.toString(10));
+			this.currentHashtableEntry += 4;
 		}
 
-		this.currentHashTableEntry = 0;
-
-		this.readSect(ent, this.processDirEntry);
-
-
-		for (var i = 0; i < AFS_HT_SIZE * 4; i += 4) {
-
-			while (ent) {
-				cd = this.readSect(ent);
-
-				// set type according to block's sec_type field
-				secType = cd.getUint32(AFS_OFF_sec_type);
-
-				switch (secType) {
-					case AFS_ST_USERDIR:
-						type = 'dir';
-						break;
-					case AFS_ST_FILE:
-						type = 'file';
-						break;
-					case AFS_ST_SOFTLINK:
-					case AFS_ST_LINKFILE:
-					case AFS_ST_LINKDIR:
-						type = 'link';
-						break;
-					default:
-						this.error('Unknown sec_type "' + secType.toString(16)
-							+ '" for block in dir chain');
-					return false;
-				}
-
-				info = {
-					'name': this.getName(ent),
-					'size': cd.getUint32(AFS_FIL_byte_size),
-					'type': type,
-					'sect': ent,
-				};
-				dir.push(info);
-				this.dirEntry(info);
-
-				this.currentDirEntry = cd.getUint32(AFS_OFF_hash_chain);
-			}
+		// Directory was empty
+		if (0 == this.currentHashtableEntry) {
+			this.debug('Empty directory');
+			return;
 		}
 
-		throw 'Error reading directory';
+		this.debug('First non null hashtable entry is ' + startingBlock.toString(10) + 
+			' at offset ' + this.currentHashtableEntry.toString(10) + ' (index ' + 
+			(this.currentHashtableEntry / 4).toString(10) + ')');
+		this.readSect(startingBlock, this.processDirEntry);
 	}
 
 	/**
 	* Change current directory
 	*/
 	this.changeDir = function(newDir) {
+		this.debug('Changing current dir to block ' + newDir);
 		this.currentDir = newDir;
 	}
 

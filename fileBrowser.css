@@ -4,11 +4,11 @@
 }
 
 li.file {
-	list-style-image: url('file.png');
+	list-style-image: url('i/file.png');
 }
 
 li.dir {
-	list-style-image: url('folder.png');
+	list-style-image: url('i/folder.png');
 }
 
 li:hover {
@@ -24,14 +24,4 @@ li:hover {
 	display: inline-block;
 	width: 60px;
 	text-align: right;
-}
-
-#debug {
-	position: absolute;
-	left: 500px;
-	top: 50px;
-	height: 500px;
-	width: 400px;
-	border: 1px solid red;
-	overflow: auto;
 }
