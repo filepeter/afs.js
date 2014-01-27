@@ -3,10 +3,10 @@ afsjs - Amiga Filesystem in javascript
 Copyright 2011-2014 by Dan Sutherland
 
 afsjs implements the Amiga filesystem in your browser. You can use it to
-browse Amiga disk images on a server and read files from it*.
+browse Amiga disk images on a server and read files from it.
 
-* OK, this is a lie - since *evil browser makers* deprecated synchronous XHR I've had to
-refactor it to be event-driven. You can browse volumes but can't read files yet.
+(OK, this is a lie - since *evil browser makers* deprecated synchronous XHR I've had to
+refactor it to be event-driven. You can browse volumes but can't read files yet)
 
 The file afs.js is the actual class the implements AFS. The remaining files in
 this archive are for a demo of its use. The demo lets you browse the Assasins
@@ -44,3 +44,4 @@ TODO:
 - Use directory cache blocks
 - Support for hardfiles
 - Write support
+
